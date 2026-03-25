@@ -1,0 +1,17 @@
+name: obs-nb-phase-picking
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - obspy>=1.4
+  - matplotlib>=3.8
+  - pytorch>=2.0
+  - numpy
+  - pandas
+  - jupyter
+  - jupyterlab
+  - pip
+  - pip:
+    - seisbench>=0.5
+    - pyocto>=0.1
+    - nbmake

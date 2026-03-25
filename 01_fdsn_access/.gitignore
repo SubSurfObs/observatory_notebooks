@@ -1,0 +1,3 @@
+# NB01 writes data/ as output — don't commit it here.
+# The same files are committed in 02_phase_picking/data/ for reproducibility.
+data/

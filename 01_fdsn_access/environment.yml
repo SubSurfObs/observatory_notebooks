@@ -1,0 +1,13 @@
+name: obs-nb-fdsn-access
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - obspy>=1.4
+  - matplotlib>=3.8
+  - cartopy>=0.22
+  - jupyter
+  - jupyterlab
+  - pip
+  - pip:
+    - nbmake
