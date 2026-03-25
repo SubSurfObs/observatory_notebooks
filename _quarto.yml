@@ -1,3 +1,2 @@
 execute:
   freeze: true    # use committed cell outputs; never re-execute at site build time
-  enabled: false  # do not attempt execution even if no frozen output exists
