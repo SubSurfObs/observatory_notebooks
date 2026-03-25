@@ -4,3 +4,9 @@ __pycache__/
 .DS_Store
 # conda envs — create locally from environment.yml, don't commit
 envs/
+
+/.quarto/
+**/*.quarto_ipynb
+# Quarto build output — rendered by the site repo, not stored here
+**/index.html
+**/*_files/
