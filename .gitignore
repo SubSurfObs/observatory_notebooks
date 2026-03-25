@@ -1,0 +1,6 @@
+.ipynb_checkpoints/
+__pycache__/
+*.pyc
+.DS_Store
+# conda envs — create locally from environment.yml, don't commit
+envs/

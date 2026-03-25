@@ -1,0 +1,80 @@
+name: Test and render notebooks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ── Discover which notebooks changed (or all on main push) ──────────────
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      notebooks: ${{ steps.list.outputs.notebooks }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: list
+        run: |
+          # Find all notebook directories (any folder containing index.ipynb)
+          dirs=$(find . -name "index.ipynb" -not -path "./.git/*" \
+                 | sed 's|/index.ipynb||' | sed 's|^\./||' | sort | jq -R . | jq -sc .)
+          echo "notebooks=$dirs" >> "$GITHUB_OUTPUT"
+          echo "Found: $dirs"
+
+  # ── Execute each notebook in its own conda env ──────────────────────────
+  execute:
+    needs: discover
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        notebook: ${{ fromJson(needs.discover.outputs.notebooks) }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: conda-incubator/setup-miniconda@v3
+        with:
+          environment-file: ${{ matrix.notebook }}/environment.yml
+          activate-environment: true
+          auto-activate-base: false
+
+      - name: Install test dependencies
+        shell: bash -l {0}
+        run: pip install nbmake
+
+      - name: Test — notebook runs without errors
+        shell: bash -l {0}
+        run: pytest --nbmake ${{ matrix.notebook }}/index.ipynb -v
+
+      - name: Render — execute and save outputs
+        shell: bash -l {0}
+        # Only commit outputs on push to main (not PRs)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          jupyter nbconvert --to notebook --execute --inplace \
+            --ExecutePreprocessor.timeout=300 \
+            ${{ matrix.notebook }}/index.ipynb
+
+      - name: Commit updated outputs
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add ${{ matrix.notebook }}/index.ipynb
+          # Skip if nothing changed
+          git diff --cached --quiet || \
+            git commit -m "chore: refresh outputs for ${{ matrix.notebook }} [skip ci]"
+
+  # ── Push all output commits together ────────────────────────────────────
+  push-outputs:
+    needs: execute
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Push refreshed outputs
+        run: git push
