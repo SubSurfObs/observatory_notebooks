@@ -1,208 +1,31 @@
 """
 utils.py — Subsurface Observatory notebook utilities
 =====================================================
-Shared helpers for FDSN data access, seismic processing, and visualisation.
-Imported by all observatory_notebooks notebooks via sys.path or direct download.
+Post-processing helpers shared across observatory notebooks.
+FDSN queries are written explicitly in each notebook — see 01_fdsn_access.
 """
 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import List, Optional
 
 import matplotlib.pyplot as plt
 import pandas as pd
 from obspy import Stream, UTCDateTime
-from obspy.clients.fdsn import Client
-from obspy.clients.fdsn.header import FDSNNoDataException
 from obspy.core.event import (Catalog, Comment, Event, Origin, OriginQuality,
                                Pick)
 from obspy.core.event.base import WaveformStreamID
 from obspy.core.event.magnitude import Magnitude
-from obspy.core.inventory import Inventory
 
 # ---------------------------------------------------------------------------
 # FDSN endpoint constants
 # ---------------------------------------------------------------------------
 
 FDSN_UOM     = "https://subsurface.science.unimelb.edu.au"   # VW, VX, Z1
-FDSN_AUSPASS = "https://auspass.edu.au"                       # OZ, AU, S1, national archive
-FDSN_RS      = "https://data.raspberryshake.org"              # RaspberryShake public network
-FDSN_IRIS    = "https://service.iris.edu"                     # IRIS/FDSN global
-
-
-# ---------------------------------------------------------------------------
-# Provider dataclasses
-# ---------------------------------------------------------------------------
-
-@dataclass(frozen=True)
-class Provider:
-    """A single FDSN endpoint."""
-    name: str
-    base_url: str
-
-
-@dataclass
-class ProviderSelection:
-    """What was retrieved from a provider for a given query."""
-    provider: Provider
-    networks: List[str]
-    stations: List[str]
-    inventory: Inventory
-
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-def _as_list_csv(x: Iterable[str]) -> str:
-    return ",".join(sorted(set(s.strip() for s in x if s and s.strip())))
-
-
-# ---------------------------------------------------------------------------
-# Multi-provider FDSN access
-# ---------------------------------------------------------------------------
-
-def collect_stations_and_waveforms(
-    *,
-    providers: Sequence[Provider],
-    requested_networks: Sequence[str],
-    latitude: float,
-    longitude: float,
-    maxradius: float,
-    starttime: UTCDateTime,
-    endtime: UTCDateTime,
-    minradius: float = 0.0,
-    level: str = "channel",
-    location: str = "*",
-    channel: str = "*",
-    attach_response: bool = False,
-    timeout: int = 60,
-    merge: bool = True,
-) -> Tuple[Stream, Dict[str, ProviderSelection]]:
-    """
-    Hierarchically resolve requested networks across multiple FDSN servers,
-    then fetch waveforms per provider.
-
-    Networks are resolved in provider order — the first provider that serves a
-    network "wins" it. This prevents duplicate data when multiple providers
-    mirror the same network.
-
-    Parameters
-    ----------
-    providers : sequence of Provider
-        Ordered list of FDSN endpoints to query. Earlier entries take priority.
-    requested_networks : sequence of str
-        Network codes to request (e.g. ["VW", "OZ"]).
-    latitude, longitude : float
-        Centre of the geographic search box (decimal degrees).
-    maxradius : float
-        Maximum search radius in degrees.
-    starttime, endtime : UTCDateTime
-        Time window for waveform retrieval.
-    minradius : float, optional
-        Minimum search radius (default 0).
-    level : str, optional
-        Station query level passed to get_stations (default "channel").
-    location, channel : str, optional
-        Location/channel codes for waveform query (default "*").
-    attach_response : bool, optional
-        Whether to attach instrument response to returned waveforms.
-    timeout : int, optional
-        Per-request HTTP timeout in seconds (default 60).
-    merge : bool, optional
-        If True, call Stream.merge() on the combined output (default True).
-
-    Returns
-    -------
-    st : obspy.Stream
-        Merged stream of all downloaded waveforms.
-    selections : dict
-        Mapping provider.name → ProviderSelection with networks/stations/inventory used.
-    """
-    requested = [n.strip() for n in requested_networks if n and n.strip()]
-    unresolved = set(requested)
-    selections: Dict[str, ProviderSelection] = {}
-    chosen_network_provider: Dict[str, str] = {}
-
-    # 1) Resolve which provider serves which network in this region
-    for p in providers:
-        if not unresolved:
-            break
-
-        client = Client(p.base_url, timeout=timeout)
-        net_query = _as_list_csv(unresolved)
-
-        try:
-            inv = client.get_stations(
-                network=net_query,
-                latitude=latitude,
-                longitude=longitude,
-                minradius=minradius,
-                maxradius=maxradius,
-                level=level,
-            )
-        except (FDSNNoDataException, Exception):
-            continue
-
-        returned_nets = sorted({net.code for net in inv})
-        claimed = [n for n in returned_nets if n in unresolved]
-        if not claimed:
-            continue
-
-        for n in claimed:
-            chosen_network_provider[n] = p.name
-            unresolved.discard(n)
-
-        if p.name in selections:
-            selections[p.name].inventory += inv
-            selections[p.name].networks = sorted(set(selections[p.name].networks) | set(claimed))
-        else:
-            selections[p.name] = ProviderSelection(
-                provider=p,
-                networks=claimed,
-                stations=[],
-                inventory=inv,
-            )
-
-    if unresolved:
-        print(f"[warn] Networks not found on any provider in this region: {', '.join(sorted(unresolved))}")
-
-    # 2) Build station lists
-    for sel in selections.values():
-        sel.stations = sorted({sta.code for net in sel.inventory for sta in net})
-
-    # 3) Fetch waveforms per provider
-    out = Stream()
-    for sel in selections.values():
-        if not sel.networks or not sel.stations:
-            continue
-
-        client = Client(sel.provider.base_url, timeout=timeout)
-        network_csv = _as_list_csv(sel.networks)
-        station_csv = _as_list_csv(sel.stations)
-
-        try:
-            st = client.get_waveforms(
-                network=network_csv,
-                station=station_csv,
-                location=location,
-                channel=channel,
-                starttime=starttime,
-                endtime=endtime,
-                attach_response=attach_response,
-            )
-            out += st
-        except FDSNNoDataException:
-            print(f"[warn] No waveforms from {sel.provider.name} for {network_csv}.{station_csv}")
-        except Exception as e:
-            print(f"[warn] Waveform fetch failed from {sel.provider.name}: {e!r}")
-
-    if merge and len(out):
-        out.merge(method=1, fill_value="interpolate")
-
-    return out, selections
+FDSN_AUSPASS = "https://auspass.edu.au"                       # OZ, AU, national archive
+FDSN_RS      = "https://data.raspberryshake.org"              # AM (RaspberryShake)
+FDSN_IRIS    = "https://service.iris.edu"                     # global fallback
 
 
 # ---------------------------------------------------------------------------
@@ -220,15 +43,11 @@ def convert_to_catalog(
     Parameters
     ----------
     events : pd.DataFrame
-        Must include columns: idx, time (UNIX epoch s), latitude, longitude, depth (km).
+        Must include: idx, time (UNIX epoch s), latitude, longitude, depth (km).
     assignments : pd.DataFrame
-        Must include columns: event_idx, station (NET.STA.LOC), phase, time, residual.
+        Must include: event_idx, station (NET.STA.LOC), phase, time, residual.
     algorithm_name : str
         Appended as a Comment to each origin.
-
-    Returns
-    -------
-    obspy.core.event.Catalog
     """
     cat = Catalog()
 
@@ -242,9 +61,10 @@ def convert_to_catalog(
             evaluation_mode="automatic",
             evaluation_status="preliminary",
             quality=OriginQuality(used_phase_count=0),
-            comments=[Comment(text=f"Localized by: {algorithm_name}", force_resource_id=False)],
+            comments=[Comment(text=f"Localized by: {algorithm_name}",
+                              force_resource_id=False)],
         )
-        mag   = Magnitude(mag=99.0, magnitude_type="ML")  # placeholder for VELEST compatibility
+        mag   = Magnitude(mag=99.0, magnitude_type="ML")  # placeholder
         event = Event(origins=[origin], magnitudes=[mag])
 
         these_picks = assignments[assignments["event_idx"] == ev["idx"]]
@@ -304,9 +124,7 @@ def SRC_velocity_format(
     depths, vps, vss = [], [], []
     for i in range(start_idx, end_idx):
         d, vp, vs = first_floats(lines[i], 3)
-        depths.append(d)
-        vps.append(vp)
-        vss.append(vs)
+        depths.append(d); vps.append(vp); vss.append(vs)
 
     df = (
         pd.DataFrame({"depth": depths, "vp": vps, "vs": vss})
@@ -316,9 +134,11 @@ def SRC_velocity_format(
 
     has_zero = len(df) and abs(df.iloc[0]["depth"]) < 1e-9
     if surface_Vp is not None and surface_Vs is not None:
-        surf = pd.DataFrame([{"depth": 0.0, "vp": float(surface_Vp), "vs": float(surface_Vs)}])
+        surf = pd.DataFrame([{"depth": 0.0, "vp": float(surface_Vp),
+                               "vs": float(surface_Vs)}])
     else:
-        surf = pd.DataFrame([{"depth": 0.0, "vp": float(df.iloc[0]["vp"]), "vs": float(df.iloc[0]["vs"])}])
+        surf = pd.DataFrame([{"depth": 0.0, "vp": float(df.iloc[0]["vp"]),
+                               "vs": float(df.iloc[0]["vs"])}])
 
     if has_zero:
         df.iloc[0] = surf.iloc[0]
@@ -345,10 +165,10 @@ def plot_station_picks_panel(
     sharex: bool = True,
 ) -> None:
     """
-    Plot one waveform per station with P (red) and S (blue) pick lines.
+    Plot one waveform per station with P (pink) and S (navy) pick lines.
 
-    Stations are sorted by P arrival time and all panels share the same time
-    axis, referenced to the earliest P pick.
+    Stations are sorted by P arrival and all panels share the same time axis,
+    referenced to the earliest P pick.
 
     Parameters
     ----------
@@ -358,19 +178,17 @@ def plot_station_picks_panel(
     pick_dict : dict, optional
         {sta: {"P": Pick, "S": Pick}} where picks have a .datetime attribute.
     assignments : pd.DataFrame, optional
-        SeisBench-style assignments with columns: event_idx, station, phase, time.
+        SeisBench-style with columns: event_idx, station, phase, time.
     event_idx : int
-        Which event to pull from assignments (ignored when pick_dict is used).
+        Which event to use from assignments.
     channel : str
         Channel selector passed to Stream.select() (default "*Z").
     window_pre_p : float
         Seconds before earliest P to start each panel.
     window_post_s : float
-        Seconds after each S pick to end that panel (when S is available).
+        Seconds after each S pick to end that panel.
     fallback_post_p : float
-        Seconds after P to use when no S pick exists.
-    sharex : bool
-        Share the x-axis across all panels.
+        Seconds after P when no S pick exists.
     """
     if (pick_dict is None) == (assignments is None):
         raise ValueError("Provide exactly one of pick_dict or assignments.")
@@ -383,7 +201,9 @@ def plot_station_picks_panel(
         df = assignments.copy()
         if "event_idx" in df.columns:
             df = df[df["event_idx"] == event_idx]
-        df["sta_code"] = df["station"].map(lambda s: str(s).split(".")[1] if "." in str(s) else str(s))
+        df["sta_code"] = df["station"].map(
+            lambda s: str(s).split(".")[1] if "." in str(s) else str(s)
+        )
         df_sta = df[df["sta_code"] == sta]
 
         def _pick(phase):
