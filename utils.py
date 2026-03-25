@@ -245,7 +245,8 @@ def plot_station_picks_panel(
         ax.plot(tr.times(reftime=t0), tr.data, "k", lw=0.8)
         ax.axvline(P_time - t0, color="#E5007D", lw=2, label="P")
         if S_time is not None:
-            ax.axvline(S_time - t0, color="#000F46", lw=2, label="S")
+            ax.axvline(S_time - t0, color="#E5007D", lw=2,
+                       linestyle="--", label="S")
         ax.set_ylabel(sta, rotation=0, ha="right", fontsize=9)
         ax.set_title(tr.id, fontsize=8)
 
